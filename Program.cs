@@ -1,30 +1,75 @@
-﻿using System;
-using System.IO;
+﻿using System.Text;
+using System.Text.RegularExpressions;
+
+internal sealed class CliSettings
+{
+    public string TargetPath { get; set; } = ".";
+    public int? Depth { get; set; } = null;          // null = unlimited; 0 = root only
+    public bool UseAscii { get; set; } = false;
+    public bool FilesOnly { get; set; } = false;     // default false
+    public bool IncludeHidden { get; set; } = false; // default false
+    public List<string> MatchGlobs { get; } = new();
+    public List<string> IgnoreGlobs { get; } = new();
+}
+
+internal sealed class GitIgnoreRule
+{
+    public Regex Regex { get; }
+    public bool IsNegation { get; }
+    public bool DirectoryOnly { get; }
+    public bool Anchored { get; }
+    public string Raw { get; }
+
+    public GitIgnoreRule(Regex regex, bool neg, bool dirOnly, bool anchored, string raw)
+    {
+        Regex = regex; IsNegation = neg; DirectoryOnly = dirOnly; Anchored = anchored; Raw = raw;
+    }
+}
 
 internal static class Program
 {
-    /// <summary>
-    /// Exit codes:
-    /// 0 = .gitignore found
-    /// 2 = .gitignore missing (expected precondition)
-    /// 1 = unexpected error
-    /// </summary>
     private static int Main(string[] args)
     {
         try
         {
-            string cwd = Directory.GetCurrentDirectory();
-            string gi  = Path.Combine(cwd, ".gitignore");
-
-            if (File.Exists(gi))
+            if (!TryParseArgs(args, out var settings, out var error))
             {
-                Console.WriteLine($"✅ .gitignore found in: {cwd}");
-                return 0;
+                if (!string.IsNullOrWhiteSpace(error)) Console.Error.WriteLine(error);
+                PrintUsage();
+                return 1;
             }
 
-            Console.WriteLine($"❌ .gitignore NOT found in: {cwd}");
-            Console.WriteLine("This tool requires a .gitignore at the project root.");
-            return 2;
+            string root = Path.GetFullPath(settings.TargetPath);
+            string giPath = Path.Combine(root, ".gitignore");
+            if (!File.Exists(giPath))
+            {
+                Console.WriteLine($"❌ .gitignore NOT found in: {root}");
+                Console.WriteLine("This tool requires a .gitignore at the project root.");
+                return 2;
+            }
+
+            var rules = LoadGitIgnore(giPath);
+            var extraIgnore = settings.IgnoreGlobs.Select(g => GlobToRegex(g)).ToList();
+            var extraMatch  = settings.MatchGlobs .Select(g => GlobToRegex(g)).ToList();
+
+            var style = settings.UseAscii ? TreeStyle.Ascii : TreeStyle.Unicode;
+            Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
+            Console.WriteLine(new DirectoryInfo(root).Name);
+
+            int remain = settings.Depth.HasValue ? Math.Max(0, settings.Depth.Value) : int.MaxValue;
+
+            var prefixStack = new List<bool>(); // true => there are more siblings at this level
+            foreach (var entry in ListEntries(root))
+            {
+                bool isLast = entry == ListEntries(root).LastOrDefault(); // small cost, OK for MVP
+                RenderNode(
+                    entry, root, rules, extraIgnore, extraMatch,
+                    settings, style, prefixStack, isLast, remain
+                );
+            }
+
+            return 0;
         }
         catch (Exception ex)
         {
@@ -32,4 +77,364 @@ internal static class Program
             return 1;
         }
     }
+
+    // ---------------- CLI parsing ----------------
+
+    private static bool TryParseArgs(string[] args, out CliSettings settings, out string error)
+    {
+        settings = new CliSettings();
+        error = string.Empty;
+
+        int i = 0;
+        if (i < args.Length && !IsSwitch(args[i]))
+        {
+            settings.TargetPath = args[i];
+            i++;
+        }
+
+        while (i < args.Length)
+        {
+            string a = args[i];
+
+            if (Eq(a, "--depth"))
+            {
+                if (!RequireValue(args, ++i, "--depth", out string? v, out error))
+                    return false;
+                if (!int.TryParse(v, out int depth) || depth < 0)
+                {
+                    error = "Invalid value for --depth. Must be a non-negative integer.";
+                    return false;
+                }
+                settings.Depth = depth;
+                i++;
+                continue;
+            }
+            if (Eq(a, "--ascii")) { settings.UseAscii = true; i++; continue; }
+            if (Eq(a, "--files-only")) { settings.FilesOnly = true; i++; continue; }
+            if (Eq(a, "--hidden")) { settings.IncludeHidden = true; i++; continue; }
+            if (Eq(a, "--match"))
+            {
+                if (!RequireValue(args, ++i, "--match", out string? v, out error)) return false;
+                settings.MatchGlobs.Add(v!); i++; continue;
+            }
+            if (Eq(a, "--ignore"))
+            {
+                if (!RequireValue(args, ++i, "--ignore", out string? v, out error)) return false;
+                settings.IgnoreGlobs.Add(v!); i++; continue;
+            }
+
+            error = $"Unknown option: {a}";
+            return false;
+        }
+
+        string full = Path.GetFullPath(settings.TargetPath);
+        if (!Directory.Exists(full))
+        {
+            error = $"Path does not exist: {settings.TargetPath}";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool IsSwitch(string s) => s.StartsWith("-", StringComparison.Ordinal);
+    private static bool Eq(string a, string b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+    private static bool RequireValue(string[] args, int idx, string opt, out string? value, out string error)
+    {
+        error = string.Empty; value = null;
+        if (idx >= args.Length || IsSwitch(args[idx])) { error = $"Missing value for {opt}."; return false; }
+        value = args[idx]; return true;
+    }
+
+    private static void PrintUsage()
+    {
+        Console.WriteLine(@"
+Usage:
+  gitree [path] [options]
+
+Options:
+  --depth <N>        Limit recursion depth (0 = just root). Default: unlimited.
+  --ascii            Use ASCII tree characters instead of Unicode.
+  --files-only       Print only files (omit directories that would be empty).
+  --hidden           Include hidden/system items (still subject to .gitignore).
+  --match  <glob>    Post-filter include by glob (can be repeated).
+  --ignore <glob>    Post-filter exclude by glob (can be repeated).
+
+Notes:
+  • The target path must contain a .gitignore; otherwise the tool exits.
+  • Globs support *, ?, ** and / anchors (gitignore-like semantics).
+");
+    }
+
+    // ---------------- Filesystem helpers ----------------
+
+    private readonly record struct Entry(string FullPath, bool IsDirectory)
+    {
+        public string Name => IsDirectory ? new DirectoryInfo(FullPath).Name : Path.GetFileName(FullPath);
+    }
+
+    private static IEnumerable<Entry> ListEntries(string dir)
+    {
+        IEnumerable<string> ents;
+        try { ents = Directory.EnumerateFileSystemEntries(dir); }
+        catch { yield break; }
+
+        foreach (var p in ents)
+        {
+            bool isDir = false;
+            try { isDir = Directory.Exists(p); } catch { /* ignore */ }
+            yield return new Entry(p, isDir);
+        }
+    }
+
+    private static bool IsHiddenFs(string path)
+    {
+        try
+        {
+            var a = File.GetAttributes(path);
+            return a.HasFlag(FileAttributes.Hidden) || a.HasFlag(FileAttributes.System);
+        }
+        catch { return false; }
+    }
+
+    private static string RelForward(string fullPath, string root)
+    {
+        var rel = Path.GetRelativePath(root, fullPath).Replace('\\', '/');
+        return rel.TrimStart('/');
+    }
+
+    // ---------------- Gitignore parsing & matching ----------------
+
+    private static List<GitIgnoreRule> LoadGitIgnore(string gitignorePath)
+    {
+        var lines = File.ReadAllLines(gitignorePath);
+        var rules = new List<GitIgnoreRule>(lines.Length);
+
+        foreach (var raw in lines)
+        {
+            var line = raw.Replace("\t", " ").TrimEnd();
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#")) continue;
+
+            bool neg = false;
+            if (line.StartsWith("!")) { neg = true; line = line[1..]; }
+
+            if (line.StartsWith(@"\#")) line = "#" + line[2..];
+            if (line.StartsWith(@"\!")) line = "!" + line[2..];
+
+            bool dirOnly = false;
+            if (line.EndsWith("/")) { dirOnly = true; line = line.TrimEnd('/'); }
+
+            bool anchored = line.StartsWith("/");
+            string pattern = anchored ? line[1..] : line;
+            if (pattern.Length == 0) continue;
+
+            var rx = BuildGitGlobRegex(pattern, anchored);
+            rules.Add(new GitIgnoreRule(rx, neg, dirOnly, anchored, raw));
+        }
+        return rules;
+    }
+
+    private static Regex GlobToRegex(string glob)
+    {
+        bool anchored = glob.StartsWith("/");
+        var pat = anchored ? glob[1..] : glob;
+        return BuildGitGlobRegex(pat, anchored);
+    }
+
+    private static Regex BuildGitGlobRegex(string pattern, bool anchored)
+    {
+        // Git-like: ** crosses dirs, * not across '/', ? single, '/' is separator.
+        var sb = new StringBuilder();
+        sb.Append(anchored ? "^" : "(^|.*/)");
+        for (int i = 0; i < pattern.Length; i++)
+        {
+            char c = pattern[i];
+            if (c == '*')
+            {
+                if (i + 1 < pattern.Length && pattern[i + 1] == '*')
+                {
+                    if (i + 2 < pattern.Length && pattern[i + 2] == '/')
+                    {
+                        sb.Append("(.*/)?"); i += 2; continue; // **/
+                    }
+                    sb.Append(".*"); i += 1; continue;          // **
+                }
+                sb.Append("[^/]*"); continue;                   // *
+            }
+            if (c == '?') { sb.Append("[^/]"); continue; }
+            if (c == '/') { sb.Append("/"); continue; }
+            sb.Append(Regex.Escape(c.ToString()));
+        }
+        sb.Append("(/.*)?$");
+        return new Regex(sb.ToString(), RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    }
+
+    private static bool IsIgnoredByGit(string relForward, bool isDir, List<GitIgnoreRule> rules)
+    {
+        bool? state = null;
+        foreach (var r in rules)
+        {
+            if (r.DirectoryOnly && !isDir) continue;
+            if (r.Regex.IsMatch(relForward)) state = !r.IsNegation; // last match wins
+        }
+        return state == true;
+    }
+
+    private static bool MatchesAny(IEnumerable<Regex> regs, string rel) =>
+        regs.Any(r => r.IsMatch(rel));
+
+    // ---------------- Printing logic ----------------
+
+    private static void RenderNode(
+        Entry entry,
+        string root,
+        List<GitIgnoreRule> rules,
+        List<Regex> extraIgnore,
+        List<Regex> extraMatch,
+        CliSettings settings,
+        TreeStyle style,
+        List<bool> prefixStack,
+        bool isLast,
+        int remainingDepth)
+    {
+        string rel = RelForward(entry.FullPath, root);
+
+        // Hidden filter first
+        if (!settings.IncludeHidden && IsHiddenFs(entry.FullPath)) return;
+
+        // .gitignore-based ignore (+ extraIgnore)
+        if (IsIgnoredByGit(rel, entry.IsDirectory, rules)) return;
+        if (extraIgnore.Count > 0 && MatchesAny(extraIgnore, rel)) return;
+
+        if (entry.IsDirectory)
+        {
+            var children = ListEntries(entry.FullPath).ToList();
+            bool exceeded = remainingDepth == 0;
+
+            // Should we print this directory?
+            bool printDir;
+            if (!settings.FilesOnly)
+            {
+                // Normal: always print (subject to ignore)
+                printDir = true;
+            }
+            else
+            {
+                // files-only: print dir if it has any printable descendants,
+                // or if dir itself matches an explicit --match filter.
+                bool dirMatches = extraMatch.Count > 0 && MatchesAny(extraMatch, rel);
+                bool hasPrintable = !exceeded && HasPrintableDescendants(
+                    children, root, rules, extraIgnore, extraMatch, settings, remainingDepth - 1
+                );
+                printDir = dirMatches || hasPrintable;
+            }
+
+            if (!printDir) return;
+
+            // Print this directory line first
+            WritePrefix(prefixStack, style);
+            Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+
+            if (exceeded)
+            {
+                if (children.Count > 0)
+                {
+                    // Print a single ellipsis as a child line
+                    prefixStack.Add(!isLast);
+                    WritePrefix(prefixStack, style);
+                    Console.WriteLine(style.Last + " " + "…");
+                    prefixStack.RemoveAt(prefixStack.Count - 1);
+                }
+                return;
+            }
+
+            // Recurse into children
+            prefixStack.Add(!isLast);
+            for (int idx = 0; idx < children.Count; idx++)
+            {
+                var ch = children[idx];
+                bool chIsLast = idx == children.Count - 1;
+                RenderNode(
+                    ch, root, rules, extraIgnore, extraMatch, settings,
+                    style, prefixStack, chIsLast, remainingDepth - 1
+                );
+            }
+            prefixStack.RemoveAt(prefixStack.Count - 1);
+        }
+        else
+        {
+            // File must pass match filters if provided
+            if (extraMatch.Count > 0 && !MatchesAny(extraMatch, rel)) return;
+
+            WritePrefix(prefixStack, style);
+            Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+        }
+    }
+
+    private static bool HasPrintableDescendants(
+        List<Entry> children,
+        string root,
+        List<GitIgnoreRule> rules,
+        List<Regex> extraIgnore,
+        List<Regex> extraMatch,
+        CliSettings settings,
+        int remainingDepth)
+    {
+        foreach (var ch in children)
+        {
+            if (!settings.IncludeHidden && IsHiddenFs(ch.FullPath)) continue;
+
+            string rel = RelForward(ch.FullPath, root);
+            if (IsIgnoredByGit(rel, ch.IsDirectory, rules)) continue;
+            if (extraIgnore.Count > 0 && MatchesAny(extraIgnore, rel)) continue;
+
+            if (!ch.IsDirectory)
+            {
+                if (extraMatch.Count == 0 || MatchesAny(extraMatch, rel))
+                    return true;
+            }
+            else
+            {
+                if (remainingDepth < 0) continue; // no room to descend
+                // Directory itself may count if it matches match-glob explicitly.
+                if (extraMatch.Count > 0 && MatchesAny(extraMatch, rel))
+                    return true;
+
+                if (remainingDepth >= 0)
+                {
+                    var grand = ListEntries(ch.FullPath).ToList();
+                    if (HasPrintableDescendants(grand, root, rules, extraIgnore, extraMatch, settings, remainingDepth - 1))
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void WritePrefix(List<bool> prefixStack, TreeStyle style)
+    {
+        // Each level: either a vertical bar (more siblings) or spaces.
+        foreach (bool more in prefixStack)
+        {
+            Console.Write(more ? style.Vert : style.Space);
+            Console.Write(' ');
+        }
+    }
+}
+
+// ---------------- Rendering styles ----------------
+
+internal sealed class TreeStyle
+{
+    public string Vert { get; }
+    public string Mid { get; }
+    public string Last { get; }
+    public string Space { get; }
+
+    private TreeStyle(string vert, string mid, string last, string space)
+    {
+        Vert = vert; Mid = mid; Last = last; Space = space;
+    }
+
+    public static TreeStyle Unicode { get; } = new TreeStyle("│", "├─", "└─", " ");
+    public static TreeStyle Ascii   { get; } = new TreeStyle("|", "|--", "`--", " ");
 }
