@@ -99,6 +99,8 @@ gitree --match "*.cs" --ignore "**/*.Designer.cs"
 
 # Run on a subfolder that also has .gitignore
 gitree src --depth 1
+
+gitree --ignore bin --ignore obj
 ```
 
 ### Exit codes
