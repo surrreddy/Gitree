@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.RegularExpressions;
 
 internal sealed class CliSettings
@@ -243,11 +243,13 @@ Notes:
     private static Regex BuildGitGlobRegex(string pattern, bool anchored)
     {
         // Git-like: ** crosses dirs, * not across '/', ? single, '/' is separator.
+        // FIX: support bracket character classes like [Bb]in/
         var sb = new StringBuilder();
         sb.Append(anchored ? "^" : "(^|.*/)");
         for (int i = 0; i < pattern.Length; i++)
         {
             char c = pattern[i];
+
             if (c == '*')
             {
                 if (i + 1 < pattern.Length && pattern[i + 1] == '*')
@@ -260,8 +262,67 @@ Notes:
                 }
                 sb.Append("[^/]*"); continue;                   // *
             }
+
             if (c == '?') { sb.Append("[^/]"); continue; }
-            if (c == '/') { sb.Append("/"); continue; }
+
+            if (c == '/')
+            {
+                sb.Append("/"); continue;
+            }
+
+            if (c == '[')
+            {
+                // Parse bracket class [ ... ]
+                int j = i + 1;
+                if (j >= pattern.Length) { sb.Append(@"\["); continue; } // trailing '[' literal
+
+                // Find closing ']'
+                bool found = false;
+                for (; j < pattern.Length; j++)
+                {
+                    if (pattern[j] == ']')
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (!found)
+                {
+                    // No closing ']' -> treat '[' literally
+                    sb.Append(@"\[");
+                    continue;
+                }
+
+                // Extract class content between i+1 and j-1
+                string cls = pattern.Substring(i + 1, j - i - 1);
+                bool negate = cls.Length > 0 && cls[0] == '!';
+                int startK = negate ? 1 : 0;
+
+                sb.Append('[');
+                if (negate) sb.Append('^');
+
+                // Copy characters; escape those meaningful to regex char classes except '-' (allowed for ranges)
+                for (int k = startK; k < cls.Length; k++)
+                {
+                    char cc = cls[k];
+                    // allow '-' for ranges; if you want literal '-', users typically place it first/last
+                    if (cc is '\\' or '^' or ']' )
+                    {
+                        sb.Append('\\').Append(cc);
+                    }
+                    else
+                    {
+                        sb.Append(cc);
+                    }
+                }
+                sb.Append(']');
+
+                i = j; // advance past closing ']'
+                continue;
+            }
+
+            // Default: escape literal
             sb.Append(Regex.Escape(c.ToString()));
         }
         sb.Append("(/.*)?$");
