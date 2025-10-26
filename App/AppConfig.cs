@@ -9,9 +9,9 @@ public static class AppConfig
     public static readonly int ExitMissingGitIgnore = 2;
     public static readonly int ExitInterrupted = 130;
     public static readonly int SelectAllSoftLimit = 5000;
-    public const string ExportFileName = "requested_src_files.txt";
+    public const string ExportFileName = "requested_src_files.md";
     public static readonly Encoding ExportEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
-    public static readonly string SectionSeparator = "---";
+    public static readonly string SectionSeparator = "---\n";
 
     public static bool EnableTuiFromArgs(string[] args)
     {
