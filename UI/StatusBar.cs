@@ -14,12 +14,6 @@ public static class StatusBar
         return FitToConsoleWidth(baseText);
     }
 
-    public static string BuildPhase3(string hint, int selectedFiles, int fullDirs, int partialDirs)
-    {
-        string baseText = $"{hint ?? string.Empty}    Selected: {selectedFiles} ({fullDirs} full, {partialDirs} partial)";
-        return FitToConsoleWidth(baseText);
-    }
-
     private static int GetConsoleWidth()
     {
         try

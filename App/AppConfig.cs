@@ -7,8 +7,6 @@ public static class AppConfig
     public static readonly int ExitMissingGitIgnore = 2;
     public static readonly int ExitInterrupted = 130;
     public static readonly int SelectAllSoftLimit = 5000;
-    public static readonly bool FilesOnlyDefault = false;
-    public static readonly bool RootExpandedByDefault = true;
 
     public static bool EnableTuiFromArgs(string[] args)
     {
