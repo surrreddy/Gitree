@@ -61,11 +61,11 @@ public sealed class OutputFileWriter
             try
             {
                 string content = File.ReadAllText(fullPath, AppConfig.ExportEncoding);
-                map[relativePath] = content;
+                map[relativePath!] = content;
             }
             catch (Exception ex)
             {
-                map[relativePath] = $"[ERROR] Could not read file: {ex.Message}";
+                map[relativePath!] = $"[ERROR] Could not read file: {ex.Message}";
             }
         }
 
