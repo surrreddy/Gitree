@@ -6,6 +6,7 @@ public static class AppConfig
     public static readonly int ExitErr = 1;
     public static readonly int ExitMissingGitIgnore = 2;
     public static readonly int ExitInterrupted = 130;
+    public static readonly int SelectAllSoftLimit = 5000;
 
     public static bool EnableTuiFromArgs(string[] args)
     {

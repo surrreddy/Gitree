@@ -88,7 +88,7 @@ internal static class Program
             {
                 var snapshot = TreeSnapshotBuilder.BuildFromTranscript(recorder.Transcript);
                 var screen = new Screen(AppConfig.ConsoleSupportsBasicAnsi());
-                return new TuiLoop().Run(snapshot, screen, Features.Phase1StatusHint);
+                return new TuiLoop().Run(snapshot, screen, Features.Phase2StatusHint);
             }
 
             return AppConfig.ExitOk;
