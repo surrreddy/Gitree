@@ -1,0 +1,49 @@
+using Gitree.Core.Selection;
+using Gitree.Core.Snapshot;
+
+namespace Gitree.UI;
+
+public static class LineComposer
+{
+    public static string Compose(TreeNode node, int lineIndex, SelectionSet selection, TreeRangeIndex index)
+    {
+        if (node == null)
+        {
+            return string.Empty;
+        }
+
+        string checkbox = node.IsDirectory
+            ? ComposeDirectoryCheckbox(lineIndex, selection, index)
+            : ComposeFileCheckbox(node, selection);
+
+        string printed = node.PrintedText ?? string.Empty;
+        return $"{checkbox} {printed}";
+    }
+
+    private static string ComposeFileCheckbox(TreeNode node, SelectionSet selection)
+    {
+        bool isSelected = selection.IsFileSelected(node.RelativePath);
+        return isSelected ? "[x]" : "[ ]";
+    }
+
+    private static string ComposeDirectoryCheckbox(int lineIndex, SelectionSet selection, TreeRangeIndex index)
+    {
+        var coverage = index.ComputeCoverage(lineIndex, selection);
+        if (coverage.TotalFiles == 0)
+        {
+            return "[ ]";
+        }
+
+        if (coverage.SelectedFiles == 0)
+        {
+            return "[ ]";
+        }
+
+        if (coverage.SelectedFiles == coverage.TotalFiles)
+        {
+            return "[x]";
+        }
+
+        return "[•]";
+    }
+}

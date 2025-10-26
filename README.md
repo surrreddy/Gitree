@@ -20,6 +20,7 @@ root
 * Windows hidden/system files are **not shown by default** (unless `--hidden`).
 * Works from any folder once the EXE is added to your PATH.
 * Optional ASCII output for easy copy/paste.
+* Optional interactive mode (`--ui`) supports keyboard navigation, tri-state selection, and exporting selected files to `requested_src_files.txt` via `P`.
 
 ---
 
