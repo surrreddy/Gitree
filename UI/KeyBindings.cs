@@ -9,6 +9,7 @@ public enum UiAction
     ToggleSelection,
     SelectAllUnder,
     ClearAllUnder,
+    Export,
     NoOp
 }
 
@@ -26,6 +27,8 @@ public static class KeyBindings
             ConsoleKey.Spacebar => UiAction.ToggleSelection,
             ConsoleKey.A when key.Modifiers.HasFlag(ConsoleModifiers.Shift) => UiAction.ClearAllUnder,
             ConsoleKey.A when key.Modifiers == 0 => UiAction.SelectAllUnder,
+            ConsoleKey.P when key.Modifiers == 0 => UiAction.Export,
+            ConsoleKey.P when key.Modifiers.HasFlag(ConsoleModifiers.Shift) => UiAction.Export,
             ConsoleKey.Escape => UiAction.NoOp,
             _ => UiAction.NoOp,
         };

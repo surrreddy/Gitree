@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Gitree.App;
@@ -87,8 +88,9 @@ internal static class Program
             if (uiRequested)
             {
                 var snapshot = TreeSnapshotBuilder.BuildFromTranscript(recorder.Transcript);
+                var printedLines = recorder.Transcript.Entries.Select(e => e.PrintedText).ToList();
                 var screen = new Screen(AppConfig.ConsoleSupportsBasicAnsi());
-                return new TuiLoop().Run(snapshot, screen, Features.Phase2StatusHint);
+                return new TuiLoop(root, printedLines).Run(snapshot, screen, Features.Phase2ExportHint);
             }
 
             return AppConfig.ExitOk;

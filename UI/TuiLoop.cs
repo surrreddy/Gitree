@@ -1,4 +1,8 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
 using Gitree.App;
+using Gitree.Core.Output;
 using Gitree.Core.Selection;
 using Gitree.Core.Snapshot;
 
@@ -7,6 +11,14 @@ namespace Gitree.UI;
 public sealed class TuiLoop
 {
     private readonly SelectionSet _selection = new();
+    private readonly string _projectRoot;
+    private readonly IReadOnlyList<string> _printedTreeLines;
+
+    public TuiLoop(string projectRoot, IReadOnlyList<string> printedTreeLines)
+    {
+        _projectRoot = projectRoot ?? throw new ArgumentNullException(nameof(projectRoot));
+        _printedTreeLines = printedTreeLines?.ToArray() ?? Array.Empty<string>();
+    }
 
     public int Run(TreeSnapshot snapshot, Screen screen, string statusHint)
     {
@@ -56,6 +68,8 @@ public sealed class TuiLoop
                         return AppConfig.ExitOk;
                     case UiAction.Interrupt:
                         return AppConfig.ExitInterrupted;
+                    case UiAction.Export:
+                        return HandleExport(snapshot);
                     case UiAction.NoOp:
                     default:
                         break;
@@ -68,6 +82,23 @@ public sealed class TuiLoop
         finally
         {
             Console.TreatControlCAsInput = previousTreatControlC;
+        }
+    }
+
+    private int HandleExport(TreeSnapshot snapshot)
+    {
+        try
+        {
+            var selectedFiles = GatherSelectedFiles(snapshot);
+            var spec = new ExportSpec(_projectRoot, _printedTreeLines, selectedFiles);
+            var writer = new OutputFileWriter();
+            writer.Write(spec);
+            return AppConfig.ExitOk;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"Export failed: {ex.Message}");
+            return AppConfig.ExitErr;
         }
     }
 
@@ -89,6 +120,49 @@ public sealed class TuiLoop
         }
 
         return cursor;
+    }
+
+    private IReadOnlyList<string> GatherSelectedFiles(TreeSnapshot snapshot)
+    {
+        if (snapshot == null || snapshot.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var results = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var node in snapshot.Lines)
+        {
+            if (node.IsDirectory)
+            {
+                continue;
+            }
+
+            if (!_selection.IsFileSelected(node.RelativePath))
+            {
+                continue;
+            }
+
+            string normalized = NormalizeRelativePath(node.RelativePath);
+            if (seen.Add(normalized))
+            {
+                results.Add(normalized);
+            }
+        }
+
+        results.Sort(StringComparer.OrdinalIgnoreCase);
+        return results;
+    }
+
+    private static string NormalizeRelativePath(string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+        {
+            return string.Empty;
+        }
+
+        return path.Replace('\\', '/');
     }
 
     private void ToggleSelection(TreeSnapshot snapshot, TreeRangeIndex rangeIndex, int cursor)

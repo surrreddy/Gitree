@@ -4,6 +4,7 @@ public static class Features
 {
     public static string Phase1StatusHint => "Arrows Move  Q Quit";
     public static string Phase2StatusHint => "Arrows Move  Space Toggle  A Select-All  Shift+A Clear-All  Q Quit";
+    public static string Phase2ExportHint => "Arrows Move  Space Toggle  A Select-All  Shift+A Clear-All  P Export  Q Quit";
 
     public static bool IsPhase1Enabled(string[] args) => AppConfig.EnableTuiFromArgs(args);
 }
