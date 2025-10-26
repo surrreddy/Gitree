@@ -1,5 +1,9 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using Gitree.App;
+using Gitree.Core.Rendering;
+using Gitree.Core.Snapshot;
+using Gitree.UI;
 
 internal sealed class CliSettings
 {
@@ -10,6 +14,7 @@ internal sealed class CliSettings
     public bool IncludeHidden { get; set; } = false; // default false
     public List<string> MatchGlobs { get; } = new();
     public List<string> IgnoreGlobs { get; } = new();
+    public bool UseTui { get; set; } = false;
 }
 
 internal sealed class GitIgnoreRule
@@ -28,6 +33,8 @@ internal sealed class GitIgnoreRule
 
 internal static class Program
 {
+    private static PrintTranscriptRecorder? s_transcriptRecorder;
+
     private static int Main(string[] args)
     {
         try
@@ -36,7 +43,7 @@ internal static class Program
             {
                 if (!string.IsNullOrWhiteSpace(error)) Console.Error.WriteLine(error);
                 PrintUsage();
-                return 1;
+                return AppConfig.ExitErr;
             }
 
             string root = Path.GetFullPath(settings.TargetPath);
@@ -45,7 +52,7 @@ internal static class Program
             {
                 Console.WriteLine($"❌ .gitignore NOT found in: {root}");
                 Console.WriteLine("This tool requires a .gitignore at the project root.");
-                return 2;
+                return AppConfig.ExitMissingGitIgnore;
             }
 
             var rules = LoadGitIgnore(giPath);
@@ -55,26 +62,43 @@ internal static class Program
             var style = settings.UseAscii ? TreeStyle.Ascii : TreeStyle.Unicode;
             Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-            Console.WriteLine(new DirectoryInfo(root).Name);
+            var recorder = new PrintTranscriptRecorder();
+            s_transcriptRecorder = recorder;
+
+            string rootDisplay = new DirectoryInfo(root).Name;
+            Console.WriteLine(rootDisplay);
+            recorder.RecordLine(string.Empty, rootDisplay, isDirectory: true, depth: 0, isLastSibling: true, printedText: rootDisplay);
 
             int remain = settings.Depth.HasValue ? Math.Max(0, settings.Depth.Value) : int.MaxValue;
 
             var prefixStack = new List<bool>(); // true => there are more siblings at this level
-            foreach (var entry in ListEntries(root))
+            var rootEntries = ListEntries(root).ToList();
+            for (int idx = 0; idx < rootEntries.Count; idx++)
             {
-                bool isLast = entry == ListEntries(root).LastOrDefault(); // small cost, OK for MVP
+                var entry = rootEntries[idx];
+                bool isLast = idx == rootEntries.Count - 1;
                 RenderNode(
                     entry, root, rules, extraIgnore, extraMatch,
                     settings, style, prefixStack, isLast, remain
                 );
             }
 
-            return 0;
+            int exitCode = AppConfig.ExitOk;
+            if (settings.UseTui)
+            {
+                var snapshot = TreeSnapshotBuilder.BuildFromTranscript(recorder.Transcript);
+                var screen = new Screen(AppConfig.ConsoleSupportsBasicAnsi());
+                exitCode = new TuiLoop().Run(snapshot, screen, Features.Phase1StatusHint);
+            }
+
+            s_transcriptRecorder = null;
+
+            return exitCode;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
-            return 1;
+            return AppConfig.ExitErr;
         }
     }
 
@@ -122,6 +146,7 @@ internal static class Program
                 if (!RequireValue(args, ++i, "--ignore", out string? v, out error)) return false;
                 settings.IgnoreGlobs.Add(v!); i++; continue;
             }
+            if (Eq(a, "--ui")) { settings.UseTui = true; i++; continue; }
 
             error = $"Unknown option: {a}";
             return false;
@@ -392,8 +417,11 @@ Notes:
             if (!printDir) return;
 
             // Print this directory line first
+            string dirPrefix = BuildPrefixString(prefixStack, style);
+            string dirLine = dirPrefix + (isLast ? style.Last : style.Mid) + " " + entry.Name;
             WritePrefix(prefixStack, style);
             Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+            s_transcriptRecorder?.RecordLine(rel, entry.Name, isDirectory: true, depth: GetDepthFromPath(rel), isLastSibling: isLast, printedText: dirLine);
 
             if (exceeded)
             {
@@ -401,8 +429,11 @@ Notes:
                 {
                     // Print a single ellipsis as a child line
                     prefixStack.Add(!isLast);
+                    string ellipsisPrefix = BuildPrefixString(prefixStack, style);
                     WritePrefix(prefixStack, style);
                     Console.WriteLine(style.Last + " " + "…");
+                    string ellipsisRel = string.IsNullOrEmpty(rel) ? "…" : rel + "/…";
+                    s_transcriptRecorder?.RecordLine(ellipsisRel, "…", isDirectory: false, depth: GetDepthFromPath(ellipsisRel), isLastSibling: true, printedText: ellipsisPrefix + style.Last + " " + "…");
                     prefixStack.RemoveAt(prefixStack.Count - 1);
                 }
                 return;
@@ -426,8 +457,11 @@ Notes:
             // File must pass match filters if provided
             if (extraMatch.Count > 0 && !MatchesAny(extraMatch, rel)) return;
 
+            string filePrefix = BuildPrefixString(prefixStack, style);
+            string fileLine = filePrefix + (isLast ? style.Last : style.Mid) + " " + entry.Name;
             WritePrefix(prefixStack, style);
             Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+            s_transcriptRecorder?.RecordLine(rel, entry.Name, isDirectory: false, depth: GetDepthFromPath(rel), isLastSibling: isLast, printedText: fileLine);
         }
     }
 
@@ -479,6 +513,40 @@ Notes:
             Console.Write(more ? style.Vert : style.Space);
             Console.Write(' ');
         }
+    }
+
+    private static string BuildPrefixString(List<bool> prefixStack, TreeStyle style)
+    {
+        if (prefixStack.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder();
+        foreach (bool more in prefixStack)
+        {
+            sb.Append(more ? style.Vert : style.Space);
+            sb.Append(' ');
+        }
+        return sb.ToString();
+    }
+
+    private static int GetDepthFromPath(string relativePath)
+    {
+        if (string.IsNullOrEmpty(relativePath))
+        {
+            return 0;
+        }
+
+        int depth = 1;
+        for (int i = 0; i < relativePath.Length; i++)
+        {
+            if (relativePath[i] == '/')
+            {
+                depth++;
+            }
+        }
+        return depth;
     }
 }
 
