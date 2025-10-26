@@ -1,5 +1,9 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using Gitree.App;
+using Gitree.Core.Rendering;
+using Gitree.Core.Snapshot;
+using Gitree.UI;
 
 internal sealed class CliSettings
 {
@@ -10,6 +14,7 @@ internal sealed class CliSettings
     public bool IncludeHidden { get; set; } = false; // default false
     public List<string> MatchGlobs { get; } = new();
     public List<string> IgnoreGlobs { get; } = new();
+    public bool EnableTui { get; set; } = false;
 }
 
 internal sealed class GitIgnoreRule
@@ -36,8 +41,11 @@ internal static class Program
             {
                 if (!string.IsNullOrWhiteSpace(error)) Console.Error.WriteLine(error);
                 PrintUsage();
-                return 1;
+                return AppConfig.ExitErr;
             }
+
+            bool uiRequested = Features.IsPhase1Enabled(args);
+            settings.EnableTui = uiRequested;
 
             string root = Path.GetFullPath(settings.TargetPath);
             string giPath = Path.Combine(root, ".gitignore");
@@ -45,7 +53,7 @@ internal static class Program
             {
                 Console.WriteLine($"❌ .gitignore NOT found in: {root}");
                 Console.WriteLine("This tool requires a .gitignore at the project root.");
-                return 2;
+                return AppConfig.ExitMissingGitIgnore;
             }
 
             var rules = LoadGitIgnore(giPath);
@@ -55,26 +63,40 @@ internal static class Program
             var style = settings.UseAscii ? TreeStyle.Ascii : TreeStyle.Unicode;
             Console.OutputEncoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
 
-            Console.WriteLine(new DirectoryInfo(root).Name);
+            var recorder = new PrintTranscriptRecorder();
+
+            var rootInfo = new DirectoryInfo(root).Name;
+            Console.WriteLine(rootInfo);
+            recorder.RecordLine(string.Empty, rootInfo, isDirectory: true, depth: 0, isLastSibling: true, printedText: rootInfo);
 
             int remain = settings.Depth.HasValue ? Math.Max(0, settings.Depth.Value) : int.MaxValue;
 
             var prefixStack = new List<bool>(); // true => there are more siblings at this level
-            foreach (var entry in ListEntries(root))
+            var topEntries = ListEntries(root).ToList();
+            for (int idx = 0; idx < topEntries.Count; idx++)
             {
-                bool isLast = entry == ListEntries(root).LastOrDefault(); // small cost, OK for MVP
+                var entry = topEntries[idx];
+                bool isLast = idx == topEntries.Count - 1;
                 RenderNode(
                     entry, root, rules, extraIgnore, extraMatch,
-                    settings, style, prefixStack, isLast, remain
+                    settings, style, prefixStack, isLast, remain,
+                    recorder, depth: 1
                 );
             }
 
-            return 0;
+            if (uiRequested)
+            {
+                var snapshot = TreeSnapshotBuilder.BuildFromTranscript(recorder.Transcript);
+                var screen = new Screen(AppConfig.ConsoleSupportsBasicAnsi());
+                return new TuiLoop().Run(snapshot, screen, Features.Phase3StatusHint);
+            }
+
+            return AppConfig.ExitOk;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex.Message}");
-            return 1;
+            return AppConfig.ExitErr;
         }
     }
 
@@ -122,6 +144,7 @@ internal static class Program
                 if (!RequireValue(args, ++i, "--ignore", out string? v, out error)) return false;
                 settings.IgnoreGlobs.Add(v!); i++; continue;
             }
+            if (Eq(a, "--ui")) { settings.EnableTui = true; i++; continue; }
 
             error = $"Unknown option: {a}";
             return false;
@@ -355,7 +378,9 @@ Notes:
         TreeStyle style,
         List<bool> prefixStack,
         bool isLast,
-        int remainingDepth)
+        int remainingDepth,
+        PrintTranscriptRecorder recorder,
+        int depth)
     {
         string rel = RelForward(entry.FullPath, root);
 
@@ -392,8 +417,11 @@ Notes:
             if (!printDir) return;
 
             // Print this directory line first
+            string prefix = BuildPrefixString(prefixStack, style);
             WritePrefix(prefixStack, style);
-            Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+            string lineText = (isLast ? style.Last : style.Mid) + " " + entry.Name;
+            Console.WriteLine(lineText);
+            recorder.RecordLine(rel, entry.Name, isDirectory: true, depth: depth, isLastSibling: isLast, printedText: prefix + lineText);
 
             if (exceeded)
             {
@@ -401,8 +429,12 @@ Notes:
                 {
                     // Print a single ellipsis as a child line
                     prefixStack.Add(!isLast);
+                    string childPrefix = BuildPrefixString(prefixStack, style);
                     WritePrefix(prefixStack, style);
-                    Console.WriteLine(style.Last + " " + "…");
+                    string ellipsisText = style.Last + " " + "…";
+                    Console.WriteLine(ellipsisText);
+                    string ellipsisRel = string.IsNullOrEmpty(rel) ? "…" : rel + "/…";
+                    recorder.RecordLine(ellipsisRel, "…", isDirectory: false, depth: depth + 1, isLastSibling: true, printedText: childPrefix + ellipsisText);
                     prefixStack.RemoveAt(prefixStack.Count - 1);
                 }
                 return;
@@ -416,7 +448,8 @@ Notes:
                 bool chIsLast = idx == children.Count - 1;
                 RenderNode(
                     ch, root, rules, extraIgnore, extraMatch, settings,
-                    style, prefixStack, chIsLast, remainingDepth - 1
+                    style, prefixStack, chIsLast, remainingDepth - 1,
+                    recorder, depth + 1
                 );
             }
             prefixStack.RemoveAt(prefixStack.Count - 1);
@@ -426,8 +459,11 @@ Notes:
             // File must pass match filters if provided
             if (extraMatch.Count > 0 && !MatchesAny(extraMatch, rel)) return;
 
+            string prefix = BuildPrefixString(prefixStack, style);
             WritePrefix(prefixStack, style);
-            Console.WriteLine((isLast ? style.Last : style.Mid) + " " + entry.Name);
+            string lineText = (isLast ? style.Last : style.Mid) + " " + entry.Name;
+            Console.WriteLine(lineText);
+            recorder.RecordLine(rel, entry.Name, isDirectory: false, depth: depth, isLastSibling: isLast, printedText: prefix + lineText);
         }
     }
 
@@ -479,6 +515,19 @@ Notes:
             Console.Write(more ? style.Vert : style.Space);
             Console.Write(' ');
         }
+    }
+
+    private static string BuildPrefixString(List<bool> prefixStack, TreeStyle style)
+    {
+        if (prefixStack.Count == 0) return string.Empty;
+
+        var sb = new StringBuilder(prefixStack.Count * 2);
+        foreach (bool more in prefixStack)
+        {
+            sb.Append(more ? style.Vert : style.Space);
+            sb.Append(' ');
+        }
+        return sb.ToString();
     }
 }
 
