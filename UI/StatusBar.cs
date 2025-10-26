@@ -4,7 +4,21 @@ public static class StatusBar
 {
     public static string Build(string hint)
     {
-        if (string.IsNullOrEmpty(hint))
+        return FormatLine(hint);
+    }
+
+    public static string BuildWithSelection(string hint, int files, int fullDirs, int partialDirs)
+    {
+        string composed = string.IsNullOrEmpty(hint)
+            ? $"Selected: {files} ({fullDirs} full, {partialDirs} partial)"
+            : $"{hint}    Selected: {files} ({fullDirs} full, {partialDirs} partial)";
+
+        return FormatLine(composed);
+    }
+
+    private static string FormatLine(string text)
+    {
+        if (string.IsNullOrEmpty(text))
         {
             return string.Empty;
         }
@@ -14,24 +28,24 @@ public static class StatusBar
             int width = Console.WindowWidth;
             if (width <= 0)
             {
-                return hint;
+                return text;
             }
 
-            if (hint.Length > width)
+            if (text.Length > width)
             {
-                return hint[..width];
+                return text[..width];
             }
 
-            if (hint.Length < width)
+            if (text.Length < width)
             {
-                return hint + new string(' ', width - hint.Length);
+                return text + new string(' ', width - text.Length);
             }
 
-            return hint;
+            return text;
         }
         catch
         {
-            return hint;
+            return text;
         }
     }
 }
